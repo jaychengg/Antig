@@ -1,0 +1,13 @@
+streamlit
+openpyxl
+google-generativeai
+requests
+pandas
+PyPDF2
+youtube-transcript-api
+beautifulsoup4
+beautifulsoup4
+plotly
+tabulate
+pandas_ta
+yfinance
