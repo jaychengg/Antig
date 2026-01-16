@@ -4,7 +4,7 @@ import requests
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import yfinance as yf
-from ingest_engine import extract_content, get_price_data_finazon, process_smart_upload, get_finazon_snapshot
+from ingest_engine import extract_content, get_price_data_finazon, load_portfolio, get_latest_price_batch
 from datetime import datetime, timedelta
 import io
 
@@ -235,18 +235,19 @@ with st.sidebar:
 
     st.header("管理")
     # Smart Upload
-    from ingest_engine import process_smart_upload, get_finazon_snapshot # Delayed import if needed, or added at top. 
-    # NOTE: I missed adding the import at the top in previous step, so I must rely on adding it here or updating top.
-    # To be safe, I'll add the import to the top of file in a separate step if this fails, 
-    # BUT I can just assume I will update the top too or it handles it. 
-    # Actually, let's assume I need to update imports.
-    # For now, I will assume the imports are handled or I will add them in `ingest_engine`
+    # Smart Upload
+    # (Cleaned up: Import handled at top)
     
     up = st.file_uploader("📂 上傳 (Smart CSV)", type=['csv', 'xlsx'])
     if up:
         try:
-            df = pd.read_csv(up) if up.name.endswith('.csv') else pd.read_excel(up)
-            st.session_state['transactions'] = process_smart_upload(df)
+            # Load into DF if Excel, else pass buffer
+            if up.name.endswith('.xlsx'):
+                source = pd.read_excel(up)
+            else:
+                source = up # Pass file buffer directly for CSV
+            
+            st.session_state['transactions'] = load_portfolio(source)
             st.success("Smart Upload 成功!")
         except Exception as e:
             st.error(f"Upload Failed: {e}")
@@ -284,15 +285,16 @@ with t1:
         total_val = 0; total_cost = 0;
         rows = []
         
-        # Batch or Loop Snapshots (Lightweight)
+        # Batch Fetch Prices (V11 Optimized)
+        tickers = portfolio_df['Ticker'].unique().tolist()
+        current_prices = get_latest_price_batch(tickers)
+
         for _, row in portfolio_df.iterrows():
             tk = row['Ticker']
             sh = row['Shares']
             h_cost = row['Cost']
             
-            # Fast Snapshot
-            snap = get_finazon_snapshot(tk) 
-            price = snap.get('price', 0)
+            price = current_prices.get(tk, 0)
             
             val = sh * price
             c_basis = sh * h_cost
