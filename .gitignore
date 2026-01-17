@@ -2,5 +2,5 @@
 *.json 
 __pycache__/ 
 venv/
-__pycache__/
 .DS_Store
+*.db

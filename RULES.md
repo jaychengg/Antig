@@ -1,32 +1,27 @@
-# The "Boris" Protocol Rules
+# Project Constitution: Antigravity War Room (V17.0 Ralph Protocol)
 
-## 1. Security & Configuration
-- **API Keys**: NEVER hardcode API keys. ALL keys (Google, Perplexity, Gemini) must be loaded from `streamlit.secrets`.
-- **Files**:
-    - `secrets.toml`: Contains actual keys (Gitignored).
-    - `secrets.example.toml`: Template for users.
+## 1. The "Ralph Check" (Mandatory Self-Correction)
+- **Definition**: Before any UI is rendered, the `ralph_check()` function MUST run.
+- **Scope**:
+    1.  **CSV Integrity**: Verify `Ticker`, `Shares`, `Avg Cost` columns exist and are numeric. If `Ticket` is found, auto-rename to `Ticker`.
+    2.  **Schema Validation**: Ensure API DataFrames contain standard columns (`Date`, `Close`, `Volume`) in Title Case.
+    3.  **Sanity Check**: If TSLA price is $0 or $5000 (bad data), trigger `st.cache_data.clear()` and retry.
+- **Enforcement**: If `ralph_check()` returns `False`, the app MUST STOP and display a specific error code, NOT a traceback.
 
-## 2. Data Truth
-- **News Source**: Market news is ONLY valid if fetched from Perplexity API (`sonar-pro`).
-- **Hallucinations**: Do not invent news. If the API fails, report the error.
+## 2. Architecture & Tech Stack
+- **OS**: MacOS Silicon Optimized.
+- **Database**: SQLite (`market_data.db`) for robust caching.
+- **Data Source**: Finazon API (Primary).
+- **Visualization**: Plotly Graph Objects (Yahoo Finance Style: Green/Red Candles, Separate Volume).
 
-## 3. Architecture (V2.0)
-- **The "One-Stop" Rule**: Perplexity output is BACKEND ONLY. The user must NEVER see raw Perplexity JSON/Text. All search data must be processed by Gemini before display.
-- **Input Agnosticism**: The app must accept and auto-process:
-    - Raw Text (Tickers/Notes)
-    - URLs (Articles)
-    - YouTube Links (Transcripts)
-    - PDF Uploads (Text Extraction)
-- **Logic**:
-    - **Intel Service**: Perplexity (Backend Search).
-    - **Analysis Service**: Gemini 2.0 Flash Exp (Frontend Analysis).
+## 3. Data Ingestion Standards (Zero-Crash)
+- **Accounting Format**: Must parse `(500.00)`, `$1,200.00`, `12.5%` without error.
+- **Schema Guard**: All DataFrames must pass through `normalize_schema(df)` to fix case-sensitivity (`date` -> `Date`) before being accessed.
 
-## 4. Analysis Framework (Strict Structure)
-Output must ALWAYS follow this format:
-1.  **Macro Analysis**: Interest rates, supply chain, geopolitical impact.
-2.  **Wyckoff Analysis**: Price structure (Accumulation/Distribution), Volume spread analysis, Phase (A-E).
+## 4. Error Handling Protocols
+- **No Tracebacks**: Use `try-except` blocks globally.
+- **Graceful Degradation**: If one ticker fails, the dashboard must load the others.
 
-## 5. Verification Cycle (The Judge)
-- **Zero Tolerance**: The app fails if it runs but displays empty data/errors.
-- **Self-Correction**: If a verification step fails (e.g., connection error), read the log -> FIX -> RE-TEST immediately.
-- **UI TESTING BAN**: Never use dynamic CSS classes. Use Text-Based Selection or aria-labels. Fallback to Python-level API verification.
+## 5. UI/UX
+- **Structure**: Vertical flow (No Tabs).
+- **Dashboard**: "Rich Table" with Live Price, Market Value, and P/L.

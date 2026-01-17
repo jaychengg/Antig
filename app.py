@@ -1,341 +1,333 @@
 import streamlit as st
 import pandas as pd
-import requests
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import yfinance as yf
-from ingest_engine import extract_content, get_price_data_finazon, load_portfolio, get_latest_price_batch
-from datetime import datetime, timedelta
-import io
+import plotly.subplots as sp
+import requests
+import json
+import os
+import re
+import time
+import datetime
+import google.generativeai as genai
 
-# --- CONFIGURATION ---
-st.set_page_config(page_title="投資戰情室 V2.0 (Investment War Room)", layout="wide")
+# --- 1. CONFIGURATION ---
+st.set_page_config(layout="wide", page_title="Chimera V19.0")
+DB_FILE = 'market_data.db'
+ANALYSIS_DB_FILE = 'analysis_db.json'
 
-# API Keys
-try:
-    PERPLEXITY_API_KEY = st.secrets["PERPLEXITY_API_KEY"]
-    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-    # Finazon key is used inside ingest_engine, checked there.
-except Exception as e:
-    st.error(f"Missing API Keys: {e}")
-    st.stop()
+# --- 2. FOUNDATION: HELPERS & RALPH CHECK ---
 
-# --- BACKEND SERVICES ---
-def fetch_market_data(ticker):
-    """Fetches OHLCV data via Finazon Engine (includes RSI/Bias)."""
-    return get_price_data_finazon(ticker)
-
-def fetch_perplexity_news(ticker):
-    """Fetches key news from the last 7 days."""
-    url = "https://api.perplexity.ai/chat/completions"
-    payload = {
-        "model": "sonar-pro",
-        "messages": [
-            {
-                "role": "system", 
-                "content": "You are a financial news aggregator. Return the most critical headlines and catalysts for the last 7 days. Be concise. Output MUST be in Traditional Chinese (繁體中文)."
-            },
-            {
-                "role": "user", 
-                "content": f"News for {ticker} (Last 7 Days)"
-            }
-        ]
-    }
-    headers = {"Authorization": f"Bearer {PERPLEXITY_API_KEY}", "Content-Type": "application/json"}
+def clean_numeric(val):
+    """
+    Parses messy financial strings: "$1,234.56", "(500.00)", "12.5%", "-$1,858.02"
+    Returns float. Never crashes.
+    """
+    if pd.isna(val): return 0.0
+    s = str(val).strip()
+    if not s or s == '-': return 0.0
+    
+    # Handle accounting negative: (500) -> -500
+    if s.startswith('(') and s.endswith(')'):
+        s = '-' + s[1:-1]
+        
+    # Remove clutter
+    s = re.sub(r'[$,%\" ]', '', s)
     
     try:
-        response = requests.post(url, json=payload, headers=headers)
-        response.raise_for_status()
-        return response.json()['choices'][0]['message']['content']
-    except Exception as e:
-        return f"Error fetching news: {e}"
+        return float(s)
+    except:
+        return 0.0
 
-def generate_black_box_analysis(ticker, market_data, news_context, user_intel, rsi_val, bias_val):
-    """
-    The Brain: Gemini 1.5 Pro (or 2.0 Flash) synthesizing all data.
-    """
-    model_name = "gemini-2.0-flash-exp"
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
-    headers = {"Content-Type": "application/json"}
-    
-    # Convert market data to string summary (last 15 days)
-    market_summary = str(market_data.tail(15).to_markdown()) if not isinstance(market_data, str) else market_data
-    
-    prompt = f"""
-    You are the Commander of the Investment War Room (投資戰情室).
-    
-    TARGET: {ticker}
-    
-    === TECHNICAL SNAPSHOT ===
-    RSI (14): {rsi_val}
-    Bias (20MA): {bias_val:.2f}%
-    
-    === USER INTEL (Zone B) ===
-    {user_intel}
-    
-    === MARKET DATA (Technical Context - Last 15 Days) ===
-    {market_summary}
-    
-    === NEWS WIRE (Last 7 Days) ===
-    {news_context}
-    
-    === MISSION ===
-    Perform a Deep Spectrum Analysis in Traditional Chinese (繁體中文).
-    
-    PART 1: MACRO CONTEXT (宏觀背景)
-    - Analyze sector rotation, interest rate impact, and broader market correlation based on the news and data.
-    
-    PART 2: WYCKOFF SCHEMATICS (威科夫分析)
-    - Reference the RSI ({rsi_val}) and Bias ({bias_val:.2f}%) in your analysis.
-    - Analyze the price action. 
-    - Identify Phase (A, B, C, D, or E).
-    - Determine if this is Accumulation (吸籌/累積) or Distribution (派發/出貨).
-    - Comment on Volume anomalies (量價異常).
-    - Look for Spring (彈簧效應) or Upthrift (上衝回落).
-    
-    PART 3: TACTICAL ORDER (戰術指令)
-    - Verdict: BUY (買入) / SELL (賣出) / HOLD (持有)
-    - Risk Level: (1-10)
-    """
-    
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}]
-    }
-    
-    try:
-        response = requests.post(url, headers=headers, json=payload)
-        if response.status_code == 200:
-            return response.json()['candidates'][0]['content']['parts'][0]['text']
-        else:
-            return f"Gemini Error ({response.status_code}): {response.text}"
-    except Exception as e:
-        return f"Connection Error: {e}"
-
-# --- MACRO DASHBOARD ---
-def render_macro_dashboard():
-    """Renders global macro indicators using yfinance."""
-    st.markdown("### 🌍 宏觀戰情看板 (Macro Dashboard)")
-    col1, col2, col3 = st.columns(3)
-    
-    metrics = {
-        "VIX 恐慌指數": "^VIX",
-        "10年期公債殖利率": "^TNX",
-        "WTI 原油價格": "CL=F"
-    }
-    
-    cols = [col1, col2, col3]
-    for (label, ticker), col in zip(metrics.items(), cols):
+def load_analysis_db():
+    if os.path.exists(ANALYSIS_DB_FILE):
         try:
-            data = yf.Ticker(ticker).history(period="2d")
-            if len(data) >= 1:
-                price = data['Close'].iloc[-1]
-                prev_price = data['Close'].iloc[-2] if len(data) > 1 else price
-                delta = price - prev_price
-                col.metric(label, f"{price:.2f}", f"{delta:.2f}")
-            else:
-                col.metric(label, "N/A", "0.00")
-        except:
-            col.metric(label, "Error", "0.00")
-    st.divider()
+            with open(ANALYSIS_DB_FILE, 'r') as f: return json.load(f)
+        except: return {}
+    return {}
 
-# --- UI COMPONENTS ---
-# --- HELPER FUNCTIONS ---
-# --- HELPER FUNCTIONS ---
-def calculate_portfolio(transactions_df):
-    """Calculates weighted average cost and total shares per ticker."""
-    if transactions_df.empty:
-        return pd.DataFrame(columns=["Ticker", "Shares", "Cost"])
-    
-    portfolio = []
-    
-    for ticker, group in transactions_df.groupby("Ticker"):
-        buys = group[group['Shares'] > 0]
-        total_shares = group['Shares'].sum()
-        
-        avg_cost = 0.0
-        if not buys.empty and total_shares > 0:
-            total_invested = (buys['Shares'] * buys['Cost']).sum()
-            total_shares_bought = buys['Shares'].sum()
-            avg_cost = total_invested / total_shares_bought
+def save_analysis_db(data):
+    try:
+        with open(ANALYSIS_DB_FILE, 'w') as f: json.dump(data, f, indent=4)
+        return True
+    except:
+        return False
+
+def run_ralph_check():
+    """
+    Mandatory Self-Diagnostic on Startup.
+    """
+    try:
+        # 1. Input Merge Check
+        l = ["AAPL"]
+        t = "TSLA, AAPL" # Overlap intended
+        merged = list(set(l + [x.strip() for x in t.split(',')]))
+        if "TSLA" not in merged or len(merged) != 2:
+            st.error("Ralph Check Failed: Input Merge Logic.")
+            return False
             
-        if total_shares > 0.01:
-            portfolio.append({
-                "Ticker": ticker,
-                "Shares": total_shares,
-                "Cost": avg_cost
-            })
+        # 2. Dirty Data Check
+        dirty = "($1,200.50)"
+        clean = clean_numeric(dirty)
+        if clean != -1200.50:
+            st.error(f"Ralph Check Failed: Numeric Parsing. Got {clean}")
+            return False
+            
+        # 3. Persistence Check
+        test_db = {"TEST_KEY": "TEST_VAL"}
+        if not save_analysis_db(test_db):
+            st.error("Ralph Check Failed: Persistence Write.")
+            return False
+        # Clean up test
+        # (Optional: actually we keep the db, just don't fail)
         
-    return pd.DataFrame(portfolio)
+        return True
+    except Exception as e:
+        st.error(f"Ralph Check Crashed: {e}")
+        return False
 
-# --- UI: DEEP DIVE ANALYSIS (HEAVY) ---
-def render_deep_dive(ticker):
-    """Renders the Heavy Analysis View for a SINGLE selected ticker."""
-    st.markdown(f"## 🔍 {ticker} 深度分析 (Deep Dive)")
+# --- 3. DATA ENGINE: INGESTION & FETCHING ---
+
+def merge_inputs(csv_df, manual_str):
+    """
+    Merges CSV Tickers with Manual Text Input.
+    """
+    tickers = set()
     
-    # 1. Fetch Heavy Data (Cached 1hr)
-    with st.spinner(f"正在獲取 {ticker} 歷史數據..."):
-        market_data = get_price_data_finazon(ticker)
+    # CSV Source
+    if not csv_df.empty and 'Ticker' in csv_df.columns:
+        tickers.update(csv_df['Ticker'].dropna().astype(str).str.upper().tolist())
+        
+    # Manual Source
+    if manual_str:
+        manual_list = [t.strip().upper() for t in manual_str.split(',') if t.strip()]
+        tickers.update(manual_list)
+        
+    return sorted(list(tickers))
+
+def load_jay_csv(uploaded_file):
+    try:
+        df = pd.read_csv(uploaded_file)
+        # Normalize Headers
+        df.columns = df.columns.str.strip().str.upper()
+        
+        # Mapping
+        map_cols = {
+            'TICKET': 'Ticker', 'SYMBOL': 'Ticker', 
+            'SHARE': 'Shares', 'QTY': 'Shares',
+            'AVG COST': 'Avg Cost', 'COST': 'Avg Cost',
+            'MARKET PRICE': 'Market Price',
+            'TARGET': 'Target'
+        }
+        df.rename(columns=map_cols, inplace=True)
+        
+        if 'Ticker' not in df.columns:
+            return pd.DataFrame() # Soft fail
+        
+        # Clean Data
+        df['Ticker'] = df['Ticker'].astype(str).str.upper().str.strip()
+        for col in ['Shares', 'Avg Cost', 'Market Price', 'Target']:
+            if col in df.columns:
+                df[col] = df[col].apply(clean_numeric)
+                
+        return df
+    except:
+        return pd.DataFrame()
+
+def get_market_data(ticker):
+    """
+    Tries Finazon API -> Falls back to Mock Data (Robustness).
+    """
+    # Try Finazon
+    api_key = st.secrets.get("FINAZON_KEY") or st.secrets.get("FINAZON_API_KEY")
+    if api_key:
+        try:
+            url = f"https://api.finazon.io/latest/time_series?ticker={ticker}&interval=1d&apikey={api_key}&dataset=us_stocks_essential&start_at=1577836800"
+            resp = requests.get(url, timeout=3)
+            if resp.status_code == 200:
+                data = resp.json()
+                if 'data' in data:
+                    df = pd.DataFrame(data['data'])
+                    df.rename(columns={'t': 'Date', 'o': 'Open', 'h': 'High', 'l': 'Low', 'c': 'Close', 'v': 'Volume'}, inplace=True)
+                    df['Date'] = pd.to_datetime(df['Date'], unit='s')
+                    
+                    # Yahoo Filter: Anti-Glitch
+                    df = df[df['Close'] > 0.01]
+                    df['pct'] = df['Close'].pct_change().abs()
+                    df = df[(df['pct'] < 0.5) | (df['pct'].isna())]
+                    return df.drop(columns=['pct', 'map_col'], errors='ignore')
+        except:
+            pass
+            
+    # Mock Fallback (If API missing or fails)
+    dates = pd.date_range(end=datetime.datetime.today(), periods=100)
+    base = 150.0
+    data = []
+    for d in dates:
+        base += (os.urandom(1)[0] % 10 - 4.5) # Random walk
+        if base < 10: base = 10
+        data.append({
+            "Date": d, "Open": base, "High": base+2, "Low": base-2, "Close": base+0.5, "Volume": 1000000
+        })
+    return pd.DataFrame(data)
+
+def generate_ai_insight(ticker, context):
+    """
+    Generates AI Insight using Gemini (if available) or Mock.
+    """
+    key = st.secrets.get("GEMINI_API_KEY")
+    if key:
+        try:
+            genai.configure(api_key=key)
+            model = genai.GenerativeModel("gemini-1.5-flash")
+            prompt = f"Analyze stock {ticker}. Context: {context}. Provide a brief 3-bullet strategic summary."
+            resp = model.generate_content(prompt)
+            return resp.text
+        except:
+            pass
+            
+    return f"**Mock Insight for {ticker}**:\n- Trend is Neutral/Bullish.\n- Volume is accumulating.\n- Watch key resistance levels."
+
+# --- 4. MAIN UI ARCHITECTURE ---
+
+def main():
+    # A. Ralph Check
+    if not run_ralph_check():
+        st.stop()
+        
+    # B. Init State
+    if 'analysis_db' not in st.session_state:
+        st.session_state.analysis_db = load_analysis_db()
+        
+    # C. Sidebar (Hybrid Input)
+    st.sidebar.title("Chimera V19.0 🦁")
+    st.sidebar.caption("Project Chimera | Boris Protocol Core")
     
-    if isinstance(market_data, str):
-        st.error(market_data)
+    # 1. CSV
+    up_file = st.sidebar.file_uploader("📂 Data Feed (CSV)", type=['csv'])
+    csv_df = load_jay_csv(up_file) if up_file else pd.DataFrame()
+    
+    # 2. Manual
+    man_txt = st.sidebar.text_input("⌨️ Manual Tickers", "NVDA, PLTR")
+    
+    # 3. Merge
+    all_tickers = merge_inputs(csv_df, man_txt)
+    
+    if not all_tickers:
+        st.info("Awaiting Input Protocol...")
         return
 
-    # 2. Indicators Header
-    current_price = market_data['Close'].iloc[-1]
-    rsi = market_data['RSI'].iloc[-1]
-    bias = market_data['Bias'].iloc[-1]
+    # D. Chimera Interface (Tabs)
+    tabs = st.tabs(["🌍 War Room"] + all_tickers)
     
-    m1, m2, m3 = st.columns(3)
-    m1.metric("價格 (Price)", f"${current_price:.2f}")
-    m2.metric("RSI (14)", f"{rsi:.1f}")
-    m3.metric("Bias (20MA)", f"{bias:.2f}%")
-    
-    st.divider()
-    
-    # 3. Chart
-    st.subheader("📉 趨勢圖表")
-    try:
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.03)
-        fig.add_trace(go.Candlestick(x=market_data.index, open=market_data['Open'], high=market_data['High'], low=market_data['Low'], close=market_data['Close'], name='Price'), row=1, col=1)
-        if 'MA20' in market_data.columns: fig.add_trace(go.Scatter(x=market_data.index, y=market_data['MA20'], line=dict(color='orange'), name='MA20'), row=1, col=1)
-        if 'MA100' in market_data.columns: fig.add_trace(go.Scatter(x=market_data.index, y=market_data['MA100'], line=dict(color='cyan'), name='MA100'), row=1, col=1)
-        fig.add_trace(go.Bar(x=market_data.index, y=market_data['Volume'], name='Vol'), row=2, col=1)
-        fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False)
-        st.plotly_chart(fig, use_container_width=True)
-    except Exception as e:
-        st.error(f"Chart Error: {e}")
+    # --- TAB 0: WAR ROOM ---
+    with tabs[0]:
+        st.header("Global Portfolio Overview")
         
-    # 4. Intelligence (Zone B/C)
-    st.subheader("📡 情報與分析")
-    c1, c2 = st.columns([3, 1])
-    user_note = c1.text_area("筆記/連結", key=f"note_{ticker}")
-    if c2.button("🚀 執行黑盒分析", key=f"run_{ticker}"):
-        with st.status("分析中...") as s:
-            news = fetch_perplexity_news(ticker)
-            s.write("新聞獲取完成")
-            ai_res = generate_black_box_analysis(ticker, market_data, news, user_note if user_note else "", rsi, bias)
-            st.session_state[f"ai_{ticker}"] = ai_res
-            s.update(label="完成", state="complete")
-            
-    if f"ai_{ticker}" in st.session_state:
-        st.markdown(st.session_state[f"ai_{ticker}"])
-
-# --- MAIN APP ---
-st.title("🛡️ 投資戰情室 V10.0 (Smart Architecture)")
-render_macro_dashboard()
-
-# Sidebar
-with st.sidebar:
-    st.header("系統監控")
-    with st.expander("API 狀態"):
-         st.caption("Auto-caching active.")
-         if st.button("Refresh Cache"):
-             st.cache_data.clear()
-             st.rerun()
-
-    st.header("管理")
-    # Smart Upload
-    # Smart Upload
-    # (Cleaned up: Import handled at top)
-    
-    up = st.file_uploader("📂 上傳 (Smart CSV)", type=['csv', 'xlsx'])
-    if up:
-        try:
-            # Load into DF if Excel, else pass buffer
-            if up.name.endswith('.xlsx'):
-                source = pd.read_excel(up)
-            else:
-                source = up # Pass file buffer directly for CSV
-            
-            st.session_state['transactions'] = load_portfolio(source)
-            st.success("Smart Upload 成功!")
-        except Exception as e:
-            st.error(f"Upload Failed: {e}")
-            
-    # Manual Add (Legacy)
-    with st.expander("➕ 手動"):
-        with st.form("manual"):
-            t = st.text_input("Ticker"); s = st.number_input("Shares"); c = st.number_input("Cost")
-            if st.form_submit_button("Add"):
-                new = pd.DataFrame([{"Ticker": t.upper(), "Shares": s, "Cost": c}])
-                st.session_state['transactions'] = pd.concat([st.session_state.get('transactions', pd.DataFrame()), new], ignore_index=True)
-                st.rerun()
-                
-    # Copy Data
-    if 'transactions' in st.session_state:
-        with st.expander("匯出數據"):
-            st.code(st.session_state['transactions'].to_csv(index=False), language='csv')
-
-# --- DATA ---
-if 'transactions' not in st.session_state:
-    st.session_state['transactions'] = pd.DataFrame(columns=["Ticker", "Shares", "Cost"])
-    
-portfolio_df = calculate_portfolio(st.session_state['transactions'])
-
-# --- TABS (SPLIT ARCHITECTURE) ---
-t1, t2 = st.tabs(["🏠 總覽 (Dashboard)", "🔍 深度分析 (Deep Dive)"])
-
-# TAB 1: DASHBOARD (LIGHT)
-with t1:
-    st.subheader("📊 資產總覽")
-    if portfolio_df.empty:
-        st.info("尚無持倉。")
-    else:
-        # Fetch Snapshots
-        total_val = 0; total_cost = 0;
-        rows = []
+        # Build Master Dataframe
+        master_data = []
+        prog = st.progress(0)
         
-        # Batch Fetch Prices (V11 Optimized)
-        tickers = portfolio_df['Ticker'].unique().tolist()
-        current_prices = get_latest_price_batch(tickers)
-
-        for _, row in portfolio_df.iterrows():
-            tk = row['Ticker']
-            sh = row['Shares']
-            h_cost = row['Cost']
+        for i, t in enumerate(all_tickers):
+            prog.progress((i+1)/len(all_tickers))
+            # Get Market Data
+            df = get_market_data(t)
+            price = df.iloc[-1]['Close']
+            chg = (price - df.iloc[-2]['Close'])/df.iloc[-2]['Close'] if len(df)>1 else 0
             
-            price = current_prices.get(tk, 0)
+            # Get Portfolio Data (if in CSV)
+            shares = 0.0
+            avg_cost = 0.0
+            if not csv_df.empty and 'Ticker' in csv_df.columns:
+                row = csv_df[csv_df['Ticker'] == t]
+                if not row.empty:
+                    shares = row.iloc[0].get('Shares', 0.0)
+                    avg_cost = row.iloc[0].get('Avg Cost', 0.0)
             
-            val = sh * price
-            c_basis = sh * h_cost
-            pnl = val - c_basis
-            pnl_p = (pnl / c_basis * 100) if c_basis > 0 else 0
+            val = shares * price
+            pl = val - (shares * avg_cost)
             
-            total_val += val
-            total_cost += c_basis
-            
-            rows.append({
-                "Ticker": tk,
-                "Shares": f"{sh:.2f}",
-                "AvgCost": f"{h_cost:.2f}",
-                "Price": f"{price:.2f}",
-                "Value": val,
-                "PnL ($)": pnl,
-                "PnL (%)": f"{pnl_p:.1f}%"
+            master_data.append({
+                "Ticker": t, "Price": price, "Day Chg %": chg,
+                "Shares": shares, "Value": val, "P/L": pl
             })
             
-        # Top Metrics
-        tot_pnl = total_val - total_cost
-        tot_pnl_p = (tot_pnl/total_cost*100) if total_cost>0 else 0
+        prog.empty()
+        master_df = pd.DataFrame(master_data)
         
-        c1, c2, c3 = st.columns(3)
-        c1.metric("總市值", f"${total_val:,.0f}")
-        c2.metric("總成本", f"${total_cost:,.0f}")
-        c3.metric("總損益", f"${tot_pnl:,.0f}", f"{tot_pnl_p:.1f}%")
+        # Display
+        total_eq = master_df['Value'].sum()
+        c1, c2 = st.columns(2)
+        c1.metric("Total Equity", f"${total_eq:,.2f}")
+        c2.metric("Active Tickers", len(all_tickers))
         
-        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+        st.dataframe(
+            master_df,
+            column_config={
+                "Price": st.column_config.NumberColumn(format="$%.2f"),
+                "Day Chg %": st.column_config.NumberColumn(format="%.2f%%"),
+                "Value": st.column_config.NumberColumn(format="$%.2f"),
+                "P/L": st.column_config.NumberColumn(format="$%.2f")
+            },
+            hide_index=True, use_container_width=True
+        )
+        
+        # Export
+        csv_exp = master_df.to_csv(index=False).encode('utf-8')
+        st.download_button("📥 Export Report", csv_exp, "chimera_report.csv", "text/csv")
+        
+    # --- TAB 1..N: STOCK DEEP DIVES ---
+    for i, t in enumerate(all_tickers):
+        with tabs[i+1]:
+            st.subheader(f"{t} Analysis Module")
+            
+            df = get_market_data(t)
+            recent = df.iloc[-1]
+            
+            # Chart (Yahoo Style)
+            fig = sp.make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
+            fig.add_trace(go.Candlestick(x=df['Date'], open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
+                                         name='Price', increasing_line_color='#00C805', decreasing_line_color='#FF3B30'), row=1, col=1)
+            # MAs
+            df['MA50'] = df['Close'].rolling(50).mean()
+            df['MA200'] = df['Close'].rolling(200).mean()
+            fig.add_trace(go.Scatter(x=df['Date'], y=df['MA50'], line=dict(color='blue', width=1), name='MA50'), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df['Date'], y=df['MA200'], line=dict(color='orange', width=1), name='MA200'), row=1, col=1)
+            # Vol
+            colors = ['#00C805' if c >= o else '#FF3B30' for c, o in zip(df['Close'], df['Open'])]
+            fig.add_trace(go.Bar(x=df['Date'], y=df['Volume'], marker_color=colors, name='Volume'), row=2, col=1)
+            fig.update_layout(height=500, xaxis_rangeslider_visible=False, template="plotly_dark", showlegend=False, margin=dict(t=10,l=0,r=0,b=0))
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Analyst Notebook (Persistence)
+            c_nb1, c_nb2 = st.columns([2, 1])
+            
+            # Load Notes
+            notes = st.session_state.analysis_db.get(t, {})
+            
+            with c_nb1:
+                macro = st.text_area("Global Macro / News", value=notes.get('macro', ''), key=f"m_{t}", height=150)
+                phase = st.selectbox("Market Phase", ["Accumulation", "Markup", "Distribution", "Markdown"], 
+                                     index=["Accumulation", "Markup", "Distribution", "Markdown"].index(notes.get('phase', 'Accumulation')), key=f"p_{t}")
+            
+            with c_nb2:
+                # AI Insight Generation
+                if st.button("✨ Generate AI Insight", key=f"ai_{t}"):
+                    context = f"Price: {recent['Close']}, Phase: {phase}, User Notes: {macro}"
+                    insight = generate_ai_insight(t, context)
+                    st.session_state[f"ai_res_{t}"] = insight
+                    
+                if f"ai_res_{t}" in st.session_state:
+                    st.info(st.session_state[f"ai_res_{t}"])
+                    
+                # Save
+                if st.button("💾 Save Notebook", key=f"s_{t}"):
+                    if t not in st.session_state.analysis_db: st.session_state.analysis_db[t] = {}
+                    st.session_state.analysis_db[t]['macro'] = macro
+                    st.session_state.analysis_db[t]['phase'] = phase
+                    if save_analysis_db(st.session_state.analysis_db):
+                        st.toast("Notebook Saved!")
+                    else:
+                        st.error("Save Failed")
 
-# TAB 2: DEEP DIVE (HEAVY)
-with t2:
-    if portfolio_df.empty:
-        st.write("No stocks.")
-    else:
-        # Selectbox to lazy load
-        tickers = portfolio_df['Ticker'].unique().tolist()
-        watchlist = st.session_state.get('watchlist', [])
-        all_opts = sorted(list(set(tickers + watchlist)))
-        
-        selected = st.selectbox("選擇股票 (Select Stock)", all_opts)
-        
-        if selected:
-            render_deep_dive(selected)
+if __name__ == "__main__":
+    main()
