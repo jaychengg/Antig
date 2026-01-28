@@ -1,5 +1,9 @@
-streamlit
-pandas
-plotly
-requests
+streamlit>=1.30.0
+pandas>=1.5.0
+plotly>=5.18.0
+yfinance==0.2.38
+requests>=2.31.0
+numpy>=1.24.0
 python-dotenv
+google-generativeai
+pandas_market_calendars
