@@ -4,3 +4,19 @@ __pycache__/
 venv/
 .DS_Store
 *.db
+
+# local runtime
+.venv/
+venv/
+__pycache__/
+artifacts/
+*.db
+*.sqlite
+execution_fingerprint.txt
+
+# private data
+*.csv
+
+# secrets
+.env
+.streamlit/secrets.toml
