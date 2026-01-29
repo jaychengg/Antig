@@ -94,8 +94,13 @@ class MarketDataEngine:
                     # 3. Save to DB
                     new_records = []
                     for d in data["data"]:
+                        # Normalize timestamp: if epoch > 10 billion, it's in milliseconds
+                        timestamp = d['t']
+                        if timestamp > 10_000_000_000:  # Millisecond epoch
+                            timestamp = timestamp // 1000  # Convert to seconds
+                        
                         new_records.append((
-                            ticker.upper(), d['t'], d['o'], d['h'], d['l'], d['c'], d['v']
+                            ticker.upper(), timestamp, d['o'], d['h'], d['l'], d['c'], d['v']
                         ))
                     
                     conn = sqlite3.connect(self.db_path)
@@ -114,7 +119,13 @@ class MarketDataEngine:
             print(f"[{ticker}] Sync Error: {e}")
 
         # 4. Return combined data
-        return self.load_from_db(ticker)
+        df = self.load_from_db(ticker)
+        
+        # 4a. Log if no data was fetched
+        if df.empty and self._get_last_timestamp(ticker) == 0:
+            print(f"[{ticker}] Warning: No data in DB after sync attempt")
+        
+        return df
 
     def load_from_db(self, ticker):
         """Read full history from SQLite"""
@@ -123,7 +134,9 @@ class MarketDataEngine:
         df = pd.read_sql(f"SELECT * FROM prices WHERE ticker='{ticker}' ORDER BY timestamp ASC", conn)
         conn.close()
         
-        if df.empty: return pd.DataFrame()
+        if df.empty:
+            print(f"[{ticker}] No data in DB (empty result)")
+            return pd.DataFrame()
 
         # Processing
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
@@ -162,5 +175,6 @@ class MarketDataEngine:
                 pct = ((latest - prev) / prev) * 100
                 results[label] = (latest, pct)
             else:
-                results[label] = (0.0, 0.0)
+                print(f"[MACRO] {ticker}: No data available - returning None")
+                results[label] = (None, None)
         return results
