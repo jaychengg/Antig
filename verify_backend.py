@@ -1,196 +1,116 @@
-import sys
-from unittest.mock import MagicMock
+import unittest
+from unittest.mock import MagicMock, patch
 import pandas as pd
-import toml
+import sys
 import os
-from ingest_engine import extract_content
+import io
 
-# --- MOCK STREAMLIT ---
-class MockStreamlit(MagicMock):
-    def __getattr__(self, name):
-        if name == "columns":
-             return lambda x: [MagicMock() for _ in range(x)] if isinstance(x, int) else [MagicMock() for _ in x]
-        if name == "tabs":
-             return lambda x: [MagicMock() for _ in x] # Return list of mocks for tabs
-        if name == "secrets":
-            # This is tricky because we assign st.secrets later. 
-            # But the mock object itself needs to behave like a dict for get access if used.
-            return MagicMock() 
-        return MagicMock()
+# --- Mock Streamlit Setup ---
+# We must mock streamlit before importing app modules that use it
+class MockStreamlit:
+    def error(self, msg):
+        print(f"❌ STREAMLIT ERROR: {msg}")
+    def warning(self, msg):
+        print(f"⚠️ STREAMLIT WARNING: {msg}")
+    def info(self, msg):
+        print(f"ℹ️ STREAMLIT INFO: {msg}")
+    def cache_data(self, ttl=None):
+        def decorator(func):
+            return func
+        return decorator
+    @property
+    def secrets(self):
+        # returns a dummy dict acting as secrets
+        return {"FINAZON_API_KEY": "dummy_key_for_testing"}
 
 sys.modules["streamlit"] = MockStreamlit()
-# Mock submodules
-sys.modules["streamlit.connections"] = MockStreamlit()
-sys.modules["streamlit.dataframe_util"] = MockStreamlit()
-sys.modules["streamlit_gsheets"] = MockStreamlit()
 
-import streamlit as st
-
-# Load actual secrets
-secrets_path = os.path.join(".streamlit", "secrets.toml")
+# Attempt to import the engine
 try:
-    with open(secrets_path, "r") as f:
-        secrets_data = toml.load(f)
-    st.secrets = secrets_data # Assign dict to st.secrets
-except Exception as e:
-    print(f"FAIL: Could not load secrets.toml: {e}")
+    import ingest_engine
+    print("✅ Successfully imported ingest_engine")
+except ImportError as e:
+    print(f"❌ BROKEN: Could not import ingest_engine: {e}")
     sys.exit(1)
 
-# --- IMPORT APP LOGIC ---
-try:
-    import app
-except Exception as e:
-    print(f"Warning during import: {e}")
-
-# --- TEST 1: FINAZON ---
-from ingest_engine import get_price_data_finazon
-
-def test_finazon():
-    print("Testing Finazon API connectivity...")
-    try:
-        ticker = "AAPL"
-        # Since verify_backend mocks st.secrets, we need to ensure ingest_engine can access it.
-        # ingest_engine imports streamlit as st.
-        # We customized the mock in this file, so st.secrets is populated.
-        
-        df = get_price_data_finazon(ticker)
-        if isinstance(df, str): # Error message
-             print(f"FAIL: Finazon returned error: {df}")
-             # sys.exit(1) # Failing hard for now
-        else:
-             if df.empty:
-                 print("FAIL: Finazon returned empty dataframe")
-             else:
-                 # Check columns
-                 required_cols = ['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'Bias']
-                 missing = [c for c in required_cols if c not in df.columns]
-                 if missing:
-                     print(f"FAIL: Missing columns: {missing}")
-                 else:
-                     # Check values
-                     last_rsi = df['RSI'].iloc[-1]
-                     last_bias = df['Bias'].iloc[-1]
-                     print(f"PASS: Finazon fetched {len(df)} rows.")
-                     print(f"      Indicators Verified -> RSI(14): {last_rsi:.2f}, Bias(20MA): {last_bias:.2f}%")
-    except Exception as e:
-        print(f"FAIL: Finazon exception: {e}")
-
-def test_macro_dashboard_connectivity():
-    print("Testing Macro Dashboard (yfinance)...")
-    try:
-        import yfinance as yf
-        vix = yf.Ticker("^VIX").history(period="1d")
-        if not vix.empty:
-            print(f"PASS: VIX fetched. Close: {vix['Close'].iloc[-1]:.2f}")
-        else:
-            print("FAIL: VIX returned empty data")
-    except Exception as e:
-        print(f"FAIL: Macro Dashboard error: {e}")
-
-# --- TEST 2: INGEST ENGINE (YOUTUBE) ---
-def test_ingest_youtube():
-    print("Testing Ingest Engine (YouTube)...")
-    # Use a solid, short video (Google's "Me at the zoo" or similar, or just a known one)
-    # Using "Me at the zoo" ID: jNQXAC9IVRw
-    dummy_url = "https://www.youtube.com/watch?v=jNQXAC9IVRw" 
+class TestBackendLogic(unittest.TestCase):
     
-    try:
-        content = extract_content(dummy_url)
-        if "YOUTUBE TRANSCRIPT START" in content:
-            print("PASS: YouTube transcript extracted.")
-        else:
-            print(f"WARNING: YouTube extraction failed or no transcript. Content: {content[:50]}...")
-            # Note: Many videos don't have transcripts. This might fail if the video has none.
-            # Allowing warning.
-    except Exception as e:
-        print(f"FAIL: YouTube Ingest Error: {e}")
+    def test_01_load_portfolio_chinese(self):
+        print("\n[Test 1] Verifying Chinese CSV Format Loading...")
+        csv_content = """代碼 (Ticker),買入股數 (Shares),平均成本,賣出股數(Shares),成交總金額 (Total Cost)
+AAPL,10,150,0,1500
+TSLA,5,200,0,1000
+"""
+        file_buffer = io.StringIO(csv_content)
+        df = ingest_engine.load_portfolio(file_buffer)
+        
+        if df.empty:
+            self.fail("❌ Portfolio is empty for valid Chinese CSV")
+        
+        row = df[df["Ticker"] == "AAPL"].iloc[0]
+        self.assertEqual(row["Net Shares"], 10)
+        print("✅ Chinese CSV format parsed correctly")
 
-# --- TEST 3: BLACK BOX LOGIC (Simple Import Check) ---
-def verify_black_box_logic():
-    print("\n[Test 3] Verifying Black Box Imports...")
-    try:
-        from app import generate_black_box_analysis, fetch_perplexity_news
-        print("✅ Analysis functions imported successfully")
-        return True
-    except ImportError as e:
-        print(f"❌ Import Failed: {e}")
-        return False
-
-# --- TEST 4: LEDGER LOGIC (V6.0) ---
-def test_ledger_calculation():
-    print("\n[Test 4] Verifying Ledger Logic (V6.0)...")
-    try:
-        from app import calculate_portfolio
-        import pandas as pd
+    def test_02_load_portfolio_english(self):
+        print("\n[Test 2] Verifying English CSV Format Loading...")
+        csv_content = """Ticker,Shares,Price
+NVDA,10,400
+MSFT,20,300
+"""
+        file_buffer = io.StringIO(csv_content)
+        df = ingest_engine.load_portfolio(file_buffer)
         
-        # Mock Data: 2 Entries for SAME Ticker
-        mock_data = pd.DataFrame([
-            {"Ticker": "AAPL", "Shares": 10, "Cost": 100},
-            {"Ticker": "AAPL", "Shares": 10, "Cost": 200}
-        ])
-        
-        # Expected: Total Shares = 20, Avg Cost = 150
-        result = calculate_portfolio(mock_data)
-        row = result.iloc[0]
-        
-        if row['Shares'] == 20 and row['Cost'] == 150:
-            print("✅ Ledger Aggregation Success: AAPL 20 Shares @ $150")
-            return True
-        else:
-            print(f"❌ Logic Error: Got {row['Shares']} Shares @ {row['Cost']}")
-            return False
+        if df.empty:
+            self.fail("❌ Portfolio is empty for valid English CSV")
             
-    except ImportError:
-         print("❌ Function not found in app.py")
-         return False
-    except Exception as e:
-         print(f"❌ Ledger Test Failed: {e}")
-         return False
+        row = df[df["Ticker"] == "NVDA"].iloc[0]
+        self.assertEqual(row["Net Shares"], 10)
+        print("✅ English CSV format parsed correctly")
 
-# --- TEST 5: V7 NATIVE CSV LOGIC ---
-def test_jay_csv_logic():
-    print("\n[Test 5] Verifying Native CSV Logic (V7.0)...")
-    try:
-        from app import process_jay_csv
-        import pandas as pd
-        import numpy as np
-        
-        # Mock Jay CSV Data
-        data = {
-            '交易日期': ['2023/01/01', '2023/01/02'],
-            '代碼': ['TSM', 'NVDA'],
-            '買入股數': [1000, 10], 
-            '賣出股數': [np.nan, np.nan],
-            '成交總金額': [500000, 4000] # TSM 500/share, NVDA 400/share
-        }
-        df_jay = pd.DataFrame(data)
-        
-        result_df = process_jay_csv(df_jay)
-        
-        if result_df.empty:
-            print("❌ Result is empty.")
-            return False
+    def test_03_finazon_api_structure(self):
+        print("\n[Test 3] Verifying Finazon API Data Handling (Mocked)...")
+        with patch('ingest_engine.requests.get') as mock_get:
+            mock_response = MagicMock()
+            # Mocking a valid Finazon response structure
+            mock_response.json.return_value = {
+                "data": [
+                    {"t": 1672531200, "o": 100, "h": 110, "l": 90, "c": 105, "v": 10000},
+                    {"t": 1672617600, "o": 105, "h": 115, "l": 100, "c": 110, "v": 12000}
+                ]
+            }
+            mock_response.status_code = 200
+            mock_get.return_value = mock_response
             
-        row1 = result_df.iloc[0]
-        # TSM: 1000 shares, 500000 total -> 500 cost/share
-        if row1['Ticker'] == 'TSM' and row1['Shares'] == 1000 and row1['Cost'] == 500:
-             print("✅ TSM Parsed Correctly")
-        else:
-             print(f"❌ TSM Error: {row1.to_dict()}")
-             return False
+            df = ingest_engine.get_price_data_finazon("AAPL")
+            self.assertFalse(df.empty)
+            self.assertIn("Close", df.columns)
+            print("✅ Finazon data structure handled correctly")
 
-        return True
+    def test_04_market_data_engine(self):
+        print("\n[Test 4] Verifying MarketDataEngine Class (V11.3)...")
+        from ingest_engine import MarketDataEngine
+        engine = MarketDataEngine()
+        
+        with patch('ingest_engine.requests.get') as mock_get:
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            # V11.3 expects lowercase keys from 't', 'o', etc.
+            mock_response.json.return_value = {
+                "data": [
+                    {"t": 1672531200, "o": 100, "h": 110, "l": 90, "c": 105, "v": 10000},
+                    {"t": 1672617600, "o": 105, "h": 115, "l": 100, "c": 110, "v": 12000}
+                ]
+            }
+            mock_get.return_value = mock_response
+            
+            df = engine.get_price_data("AAPL")
+            
+            self.assertFalse(df.empty)
+            self.assertIn("timestamp", df.columns)
+            self.assertIn("close", df.columns)
+            self.assertIn("MA20", df.columns)
+            self.assertIn("RSI", df.columns)
+            print("✅ MarketDataEngine columns & indicators verified")
 
-    except Exception as e:
-         print(f"❌ CSV Logic Error: {e}")
-         return False
-
-def run_tests():
-    # Only running specific logic tests to avoid mock issues with app.py sidebar
-    t5 = test_jay_csv_logic()
-    
-    if t5:
-        print("\n✅ V7 LOGIC TEST PASSED")
-
-if __name__ == "__main__":
-    test_jay_csv_logic()
+if __name__ == '__main__':
+    unittest.main()
