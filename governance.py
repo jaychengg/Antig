@@ -41,9 +41,7 @@ class FinazonGovernance:
                         self.state = saved
                     else:
                         print("[INFO] New Day: Resetting Governance Budget")
-                        # State resets automatically due to _init_state defaults if dates mismatch?
-                        # No, we need to explicitly reset if loaded date is old
-                            self.state["date"] = datetime.now().strftime("%Y-%m-%d")
+                        self.state["date"] = datetime.now().strftime("%Y-%m-%d")
                         self.state["daily_requests"] = 0
                         self.state["tickers"] = {}
             except Exception as e:
